@@ -1,5 +1,5 @@
 {
-  "name": "crayfish-voice-assistant",
+  "name": "voice-first",
   "version": "1.0.0",
   "description": "小龙虾语音助手",
   "main": "server.js",
