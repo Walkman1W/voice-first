@@ -7,8 +7,12 @@ class CommandType(str, Enum):
     WAKE = "wake"
     SEND = "send"
     EXIT = "exit"
+    PAUSE = "pause"
+    RESUME = "resume"
     REPLAY = "replay"
     CLEAR = "clear"
+    PREV = "prev"
+    NEXT = "next"
     NONE = "none"
 
 
@@ -24,7 +28,11 @@ SEND_PATTERN = re.compile(r"ok\s*ok", re.IGNORECASE)
 EXIT_PATTERN = re.compile(r"结束\s*结束")
 EXIT_WORDS = ["退出"]
 REPLAY_WORDS = ["重复播放", "再放一遍", "重复一遍"]
+PREV_WORDS = ["上一句", "上一个"]
+NEXT_WORDS = ["下一句", "下一个"]
 CLEAR_WORDS = ["清空对话"]
+PAUSE_WORDS = ["暂停"]
+RESUME_WORDS = ["继续"]
 
 
 def _match_any(text: str, words: list[str]) -> bool:
@@ -50,6 +58,18 @@ def parse_command(text: str) -> ParseResult:
 
     if _match_any(text, REPLAY_WORDS):
         return ParseResult(CommandType.REPLAY, "")
+
+    if _match_any(text, PREV_WORDS):
+        return ParseResult(CommandType.PREV, "")
+
+    if _match_any(text, NEXT_WORDS):
+        return ParseResult(CommandType.NEXT, "")
+
+    if _match_any(text, PAUSE_WORDS):
+        return ParseResult(CommandType.PAUSE, "")
+
+    if _match_any(text, RESUME_WORDS):
+        return ParseResult(CommandType.RESUME, "")
 
     if _match_any(text, CLEAR_WORDS):
         return ParseResult(CommandType.CLEAR, "")

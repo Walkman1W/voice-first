@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
+from typing import AsyncIterator, Literal
 
 
 class ASREngine(ABC):
+    name: str = "base"
+    mode: Literal["server", "client"] = "server"
+
     @abstractmethod
     async def start(self) -> None:
         """Initialize the engine and load models."""
@@ -30,6 +34,9 @@ class ASREngine(ABC):
     async def stop(self) -> None:
         """Release resources."""
 
+    async def receive_result(self, text: str, is_final: bool) -> None:
+        """Receive recognition result from client-side engine (used in client mode)."""
+
 
 class TTSEngine(ABC):
     @abstractmethod
@@ -41,3 +48,8 @@ class LLMEngine(ABC):
     @abstractmethod
     async def chat(self, message: str, history: list[dict]) -> str:
         """Send message with conversation history and return AI reply."""
+
+    async def chat_stream(self, message: str, history: list[dict]) -> AsyncIterator[str]:
+        """Stream chat response token by token. Default falls back to non-streaming."""
+        result = await self.chat(message, history)
+        yield result

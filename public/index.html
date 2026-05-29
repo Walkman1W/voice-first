@@ -311,6 +311,8 @@
     <div class="toggle on" id="toggleKeywords" onclick="toggleKeywordMode()"></div>
     <span class="toggle-label">VAD自动暂停</span>
     <div class="toggle on" id="toggleVadPause" onclick="toggleVadPause()"></div>
+    <span class="toggle-label">AEC回声消除</span>
+    <div class="toggle on" id="toggleAEC" onclick="toggleAEC()"></div>
   </div>
 
   <div class="input-area">
@@ -341,6 +343,7 @@ class AudioPlayer {
     this.lastPlayed = null; // 用于 replay
     this._onStateChange = null;
     this._onQueueEmpty = null;
+    this._aec = null; // AEC 引用，由外部设置
   }
 
   onStateChange(fn) { this._onStateChange = fn; }
@@ -363,6 +366,7 @@ class AudioPlayer {
       this.current = null;
       this._setState('idle');
       this._updateUI();
+      if (this._aec) this._aec.disconnectReference();
       if (this._onQueueEmpty) this._onQueueEmpty();
       return;
     }
@@ -370,13 +374,20 @@ class AudioPlayer {
     const item = this.queue.shift();
     const url = URL.createObjectURL(item.blob);
     const audio = new Audio(url);
+    audio.crossOrigin = 'anonymous';
 
     this.current = { ...item, audio, url };
     this._setState('playing');
     this._updateUI();
 
+    // 连接 AEC 参考信号
+    if (this._aec && this._aec._audioCtx) {
+      this._aec.connectReference(audio);
+    }
+
     audio.onended = () => {
       URL.revokeObjectURL(url);
+      if (this._aec) this._aec.disconnectReference();
       this.lastPlayed = item;
       this.current = null;
       this._playNext();
@@ -384,11 +395,13 @@ class AudioPlayer {
 
     audio.onerror = () => {
       URL.revokeObjectURL(url);
+      if (this._aec) this._aec.disconnectReference();
       this.current = null;
       this._playNext();
     };
 
     audio.play().catch(() => {
+      if (this._aec) this._aec.disconnectReference();
       this.current = null;
       this._playNext();
     });
@@ -423,6 +436,7 @@ class AudioPlayer {
       this.current.audio.pause();
       if (this.current.url) URL.revokeObjectURL(this.current.url);
     }
+    if (this._aec) this._aec.disconnectReference();
     this.current = null;
     this.queue = [];
     this._setState('idle');
@@ -443,8 +457,150 @@ class AudioPlayer {
 }
 
 // ============================================================
-// VAD: 语音活动检测 + 0.5s pre-buffer
+// AEC: 声学回声消除 (NLMS 自适应滤波)
 // ============================================================
+class AcousticEchoCanceller {
+  constructor(options = {}) {
+    this.filterLength = options.filterLength || 256;
+    this.mu = options.mu || 0.05; // NLMS step size
+    this.eps = 1e-8;
+    this.weights = new Float32Array(this.filterLength);
+    this.refBuffer = new Float32Array(this.filterLength);
+    this._refRingBuffer = [];
+    this._refWritePos = 0;
+    this._isPlaying = false;
+    this._audioCtx = null;
+    this._refSource = null;
+    this._refProcessor = null;
+    this._refAnalyser = null;
+  }
+
+  setAudioContext(ctx) {
+    this._audioCtx = ctx;
+  }
+
+  // 将播放的音频连接为参考信号
+  connectReference(audioElement) {
+    if (!this._audioCtx) return;
+    try {
+      this._refSource = this._audioCtx.createMediaElementSource(audioElement);
+      this._refAnalyser = this._audioCtx.createAnalyser();
+      this._refAnalyser.fftSize = 512;
+      this._refSource.connect(this._refAnalyser);
+      this._refAnalyser.connect(this._audioCtx.destination);
+      this._isPlaying = true;
+    } catch (e) {
+      // 已经被连接过的 audio element 不能重复 createMediaElementSource
+      this._isPlaying = true;
+    }
+  }
+
+  disconnectReference() {
+    this._isPlaying = false;
+    if (this._refSource) {
+      try { this._refSource.disconnect(); } catch {}
+      this._refSource = null;
+    }
+    if (this._refAnalyser) {
+      try { this._refAnalyser.disconnect(); } catch {}
+      this._refAnalyser = null;
+    }
+  }
+
+  // 获取当前参考信号的 RMS
+  getRefRMS() {
+    if (!this._isPlaying || !this._refAnalyser) return 0;
+    const data = new Float32Array(this._refAnalyser.fftSize);
+    this._refAnalyser.getFloatTimeDomainData(data);
+    let rms = 0;
+    for (let i = 0; i < data.length; i++) rms += data[i] * data[i];
+    return Math.sqrt(rms / data.length);
+  }
+
+  // NLMS 自适应滤波: 从麦克风 RMS 中减去回声估计
+  process(micRMS) {
+    if (!this._isPlaying) return micRMS;
+
+    const refRMS = this.getRefRMS();
+    if (refRMS < 1e-6) return micRMS;
+
+    // 更新参考缓冲区
+    this.refBuffer.copyWithin(0, 1);
+    this.refBuffer[this.filterLength - 1] = refRMS;
+
+    // 计算回声估计 (FIR 滤波)
+    let echoEstimate = 0;
+    for (let i = 0; i < this.filterLength; i++) {
+      echoEstimate += this.weights[i] * this.refBuffer[i];
+    }
+
+    // 误差 = 麦克风 - 回声估计
+    const error = micRMS - echoEstimate;
+
+    // NLMS 权重更新
+    let refPower = 0;
+    for (let i = 0; i < this.filterLength; i++) {
+      refPower += this.refBuffer[i] * this.refBuffer[i];
+    }
+    const normFactor = this.mu / (refPower + this.eps);
+    for (let i = 0; i < this.filterLength; i++) {
+      this.weights[i] += normFactor * error * this.refBuffer[i];
+    }
+
+    // 返回消除回声后的信号强度，钳位到 0
+    return Math.max(0, error);
+  }
+
+  // 简化模式：播放中直接抑制
+  processSuppression(micRMS) {
+    if (!this._isPlaying) return micRMS;
+    const refRMS = this.getRefRMS();
+    // 当参考信号强于阈值时，按比例抑制麦克风信号
+    if (refRMS > 0.005) {
+      const suppressionFactor = Math.max(0, 1 - (refRMS * 8));
+      return micRMS * suppressionFactor;
+    }
+    return micRMS;
+  }
+
+  get isPlaying() { return this._isPlaying; }
+
+  reset() {
+    this.weights.fill(0);
+    this.refBuffer.fill(0);
+    this._isPlaying = false;
+  }
+}
+
+// ============================================================
+// VAD: 语音活动检测 + AEC 集成
+// ============================================================
+function assertMicCaptureSupported() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const secureHint = window.isSecureContext
+      ? '当前浏览器不支持麦克风采集 API。请使用最新版 Chrome 或 Edge。'
+      : '当前页面不是安全上下文，浏览器不会开放麦克风 API。请通过 http://localhost:5173、http://localhost:3000 或 HTTPS 访问，不要用普通 HTTP 的局域网 IP 或 file:// 打开。';
+    throw new Error(`${secureHint} 当前地址: ${window.location.href}`);
+  }
+}
+
+function normalizeMicCaptureError(error) {
+  if (!error || !error.name) return error;
+  if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
+    return new Error('麦克风权限被拒绝。请在浏览器地址栏允许麦克风权限后重试。');
+  }
+  if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+    return new Error('未找到可用麦克风，请检查设备连接后重试。');
+  }
+  if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+    return new Error('麦克风暂时不可用，可能被其他应用占用。请关闭占用麦克风的程序后重试。');
+  }
+  if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+    return new Error('选择的麦克风不可用，请切换为默认输入或重新选择设备。');
+  }
+  return error;
+}
+
 class VADDetector {
   constructor(options = {}) {
     this.threshold = options.threshold || 0.015;
@@ -460,16 +616,29 @@ class VADDetector {
     this._speaking = false;
     this._silenceTimer = null;
     this._rafId = null;
+    this.aec = new AcousticEchoCanceller();
   }
 
   async start() {
     if (this._active) return;
-    this._stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      assertMicCaptureSupported();
+      this._stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+    } catch (error) {
+      throw normalizeMicCaptureError(error);
+    }
     this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = this._audioCtx.createMediaStreamSource(this._stream);
     this._analyser = this._audioCtx.createAnalyser();
     this._analyser.fftSize = 512;
     source.connect(this._analyser);
+    this.aec.setAudioContext(this._audioCtx);
     this._active = true;
     this._monitor();
   }
@@ -482,6 +651,8 @@ class VADDetector {
       this._stream.getTracks().forEach(t => t.stop());
       this._stream = null;
     }
+    this.aec.disconnectReference();
+    this.aec.reset();
     if (this._audioCtx) {
       this._audioCtx.close();
       this._audioCtx = null;
@@ -498,7 +669,10 @@ class VADDetector {
     for (let i = 0; i < data.length; i++) rms += data[i] * data[i];
     rms = Math.sqrt(rms / data.length);
 
-    if (rms > this.threshold) {
+    // AEC 处理：先消除回声，再做 VAD 判断
+    const cleanRMS = this.aec.process(rms);
+
+    if (cleanRMS > this.threshold) {
       if (this._silenceTimer) {
         clearTimeout(this._silenceTimer);
         this._silenceTimer = null;
@@ -522,6 +696,7 @@ class VADDetector {
 
   get isSpeaking() { return this._speaking; }
   get stream() { return this._stream; }
+  get audioContext() { return this._audioCtx; }
 }
 
 // ============================================================
@@ -535,6 +710,7 @@ let inputBuffer = '';
 let chatHistory = [];
 let keywordModeEnabled = true;
 let vadPauseEnabled = true;
+let aecEnabled = true;
 
 const audioPlayer = new AudioPlayer();
 let vad = null;
@@ -714,9 +890,9 @@ function startASR() {
   };
 
   recognition.onend = () => {
-    if (sessionActive && audioPlayer.state !== 'playing') {
+    if (sessionActive) {
       setTimeout(() => {
-        if (sessionActive && audioPlayer.state !== 'playing') {
+        if (sessionActive) {
           try { recognition.start(); } catch(e) { setTimeout(() => startASR(), 500); }
         }
       }, 200);
@@ -758,15 +934,12 @@ async function startVAD() {
       if (vadPauseEnabled && audioPlayer.state === 'playing') {
         audioPlayer.pause();
       }
-      if (!recognition && sessionActive) {
-        startASR();
-      }
     },
-    onVoiceEnd: () => {
-      // 不自动操作，等关键词
-    }
+    onVoiceEnd: () => {}
   });
   await vad.start();
+  // 将 AEC 实例绑定给 AudioPlayer，使播放时 AEC 能获取参考信号
+  audioPlayer._aec = vad.aec;
 }
 
 // ============================================================
@@ -899,7 +1072,7 @@ async function sendToAI(text) {
     addMessage('system', '错误: ' + err.message);
   }
 
-  if (sessionActive && audioPlayer.state === 'idle') {
+  if (sessionActive) {
     startASR();
   }
 }
@@ -984,6 +1157,20 @@ function toggleKeywordMode() {
 function toggleVadPause() {
   vadPauseEnabled = !vadPauseEnabled;
   document.getElementById('toggleVadPause').classList.toggle('on', vadPauseEnabled);
+}
+
+function toggleAEC() {
+  aecEnabled = !aecEnabled;
+  document.getElementById('toggleAEC').classList.toggle('on', aecEnabled);
+  if (vad && vad.aec) {
+    if (!aecEnabled) {
+      vad.aec.disconnectReference();
+      vad.aec._isPlaying = false;
+      audioPlayer._aec = null;
+    } else {
+      audioPlayer._aec = vad.aec;
+    }
+  }
 }
 
 // ============================================================

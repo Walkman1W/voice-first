@@ -1,3 +1,6 @@
+import json
+from typing import AsyncIterator
+
 import httpx
 from .base import LLMEngine
 
@@ -26,18 +29,20 @@ class OpenClawLLMEngine(LLMEngine):
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def chat(self, message: str, history: list[dict]) -> str:
-        messages = [
+    def _build_messages(self, message: str, history: list[dict]) -> list[dict]:
+        return [
             {"role": "system", "content": SYSTEM_PROMPT},
             *history[-20:],
             {"role": "user", "content": message},
         ]
+
+    async def chat(self, message: str, history: list[dict]) -> str:
         resp = await self.client.post(
             f"{self.base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {self.token}"},
             json={
                 "model": self.model,
-                "messages": messages,
+                "messages": self._build_messages(message, history),
                 "max_tokens": 300,
                 "stream": False,
             },
@@ -45,3 +50,31 @@ class OpenClawLLMEngine(LLMEngine):
         resp.raise_for_status()
         data = resp.json()
         return data["choices"][0]["message"]["content"]
+
+    async def chat_stream(self, message: str, history: list[dict]) -> AsyncIterator[str]:
+        async with self.client.stream(
+            "POST",
+            f"{self.base_url}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {self.token}"},
+            json={
+                "model": self.model,
+                "messages": self._build_messages(message, history),
+                "max_tokens": 300,
+                "stream": True,
+            },
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                    delta = chunk["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
