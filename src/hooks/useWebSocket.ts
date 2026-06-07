@@ -1,9 +1,15 @@
 import { useRef, useCallback, useEffect, useState } from 'react'
 import type { ServerMessage, ClientMessage, AppState } from '../types'
 
-const WS_URL = import.meta.env.VITE_WS_PORT
-  ? `ws://${window.location.hostname}:${import.meta.env.VITE_WS_PORT}/ws`
-  : `ws://${window.location.host}/ws`
+function getWsUrl(): string | Promise<string> {
+  if (window.electronAPI) {
+    return window.electronAPI.getBackendUrl()
+  }
+  if (import.meta.env.VITE_WS_PORT) {
+    return `ws://${window.location.hostname}:${import.meta.env.VITE_WS_PORT}/ws`
+  }
+  return `ws://${window.location.host}/ws`
+}
 
 export interface WebSocketHook {
   connected: boolean
@@ -21,10 +27,11 @@ export function useWebSocket(): WebSocketHook {
   const handlersRef = useRef<Array<(msg: ServerMessage) => void>>([])
   const reconnectTimer = useRef<number | null>(null)
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
 
-    const ws = new WebSocket(WS_URL)
+    const url = await getWsUrl()
+    const ws = new WebSocket(url)
 
     ws.onopen = () => {
       setConnected(true)

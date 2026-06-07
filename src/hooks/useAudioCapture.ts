@@ -1,5 +1,4 @@
 import { useRef, useCallback, useState } from 'react'
-import { MicVAD } from '@ricky0123/vad-web'
 import type { ClientMessage } from '../types'
 
 export interface AudioCaptureHook {
@@ -17,13 +16,15 @@ export function useAudioCapture(
 ): AudioCaptureHook {
   const [isCapturing, setIsCapturing] = useState(false)
   const [isVoiceActive, setIsVoiceActive] = useState(false)
-  const vadRef = useRef<MicVAD | null>(null)
+  const vadRef = useRef<any>(null)
   const voiceActiveRef = useRef(false)
+  const failedRef = useRef(false)
 
   const startCapture = useCallback(async () => {
-    if (vadRef.current) return
+    if (vadRef.current || failedRef.current) return
 
     try {
+      const { MicVAD } = await import('@ricky0123/vad-web')
       const vad = await MicVAD.new({
         model: 'v5',
         baseAssetPath: '/vad/',
@@ -66,6 +67,7 @@ export function useAudioCapture(
       setIsCapturing(true)
       onEvent?.(`Silero VAD 输入轨已启动${vadOnly ? ' (仅检测)' : ''}`)
     } catch (error) {
+      failedRef.current = true
       const msg = error instanceof Error ? error.message : '麦克风权限被拒绝或设备不可用'
       throw new Error(msg)
     }

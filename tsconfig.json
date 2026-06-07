@@ -19,6 +19,6 @@
     "resolveJsonModule": true,
     "esModuleInterop": true
   },
-  "include": ["src"],
+  "include": ["src", "src/electron.d.ts"],
   "exclude": ["node_modules", "dist", "dist-electron"]
 }

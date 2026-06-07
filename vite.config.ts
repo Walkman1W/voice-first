@@ -1,54 +1,48 @@
-import { defineConfig } from 'vite'
+import { defineConfig, Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
-import electron from 'vite-plugin-electron'
-import renderer from 'vite-plugin-electron-renderer'
 import path from 'path'
 
-export default defineConfig(({ mode }) => {
-  const isElectron = mode === 'electron'
-
+function serveVadWasm(): Plugin {
   return {
-    plugins: [
-      react(),
-      ...(isElectron
-        ? [
-            electron([
-              {
-                entry: 'electron/main.ts',
-                vite: {
-                  build: {
-                    outDir: 'dist-electron',
-                    rollupOptions: {
-                      external: ['electron'],
-                    },
-                  },
-                },
-              },
-            ]),
-            renderer(),
-          ]
-        : []),
-    ],
-    root: '.',
-    build: {
-      outDir: 'dist',
-    },
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, 'src'),
-      },
-    },
-    server: {
-      port: 5173,
-      proxy: {
-        '/ws': {
-          target: 'http://127.0.0.1:8765',
-          ws: true,
-        },
-        '/api': {
-          target: 'http://127.0.0.1:3000',
-        },
-      },
+    name: 'serve-vad-wasm',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url?.startsWith('/vad/') && req.url.includes('.mjs')) {
+          const clean = req.url.split('?')[0]
+          req.url = clean
+          req.originalUrl = clean
+        }
+        next()
+      })
     },
   }
+}
+
+export default defineConfig({
+  plugins: [serveVadWasm(), react()],
+  root: '.',
+  build: {
+    outDir: 'dist',
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
+  optimizeDeps: {
+    include: ['@ricky0123/vad-web'],
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      '/ws': {
+        target: 'http://127.0.0.1:8765',
+        ws: true,
+      },
+    },
+    headers: {
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Opener-Policy': 'same-origin',
+    },
+  },
 })
