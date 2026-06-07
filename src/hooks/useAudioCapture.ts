@@ -1,6 +1,17 @@
-import { useRef, useCallback, useState } from 'react'
+import { useRef, useCallback, useState, useEffect } from 'react'
 import { MicVAD } from '@ricky0123/vad-web'
+import { appConfig } from '../config'
 import type { ClientMessage } from '../types'
+
+let micPermissionGranted = false
+
+export function preRequestMicrophone() {
+  if (micPermissionGranted) return
+  navigator.mediaDevices?.getUserMedia({ audio: true }).then((stream) => {
+    micPermissionGranted = true
+    stream.getTracks().forEach((t) => t.stop())
+  }).catch(() => {})
+}
 
 export interface AudioCaptureHook {
   isCapturing: boolean
@@ -13,22 +24,33 @@ export function useAudioCapture(
   send: (msg: ClientMessage) => void,
   inputDeviceId?: string,
   onEvent?: (message: string) => void,
-  vadOnly?: boolean
+  vadOnly?: boolean,
+  onVoiceEnd?: () => void,
+  onVoiceStart?: () => void
 ): AudioCaptureHook {
   const [isCapturing, setIsCapturing] = useState(false)
   const [isVoiceActive, setIsVoiceActive] = useState(false)
   const vadRef = useRef<MicVAD | null>(null)
+  const startingRef = useRef(false)
   const voiceActiveRef = useRef(false)
 
+  useEffect(() => {
+    preRequestMicrophone()
+  }, [])
+
   const startCapture = useCallback(async () => {
-    if (vadRef.current) return
+    if (vadRef.current || startingRef.current) return
+    startingRef.current = true
 
     try {
       const vad = await MicVAD.new({
-        model: 'v5',
-        baseAssetPath: '/vad/',
-        onnxWASMBasePath: '/vad/',
+        model: appConfig.vadModel,
+        baseAssetPath: appConfig.vadAssetPath,
+        onnxWASMBasePath: appConfig.vadAssetPath,
         startOnLoad: true,
+        positiveSpeechThreshold: appConfig.vadPositiveThreshold,
+        negativeSpeechThreshold: appConfig.vadNegativeThreshold,
+        minSpeechMs: appConfig.vadMinSpeechMs,
         ...(inputDeviceId ? {
           getStream: () => navigator.mediaDevices.getUserMedia({
             audio: { deviceId: { exact: inputDeviceId }, channelCount: 1 },
@@ -38,21 +60,21 @@ export function useAudioCapture(
           voiceActiveRef.current = true
           setIsVoiceActive(true)
           onEvent?.('Silero VAD: voice_start')
-          if (!vadOnly) {
-            send({ type: 'voice_start' })
-          }
+          onVoiceStart?.()
+          send({ type: 'voice_start' })
         },
         onSpeechEnd: (audio: Float32Array) => {
           voiceActiveRef.current = false
           setIsVoiceActive(false)
           onEvent?.('Silero VAD: voice_end')
+          onVoiceEnd?.()
 
           if (!vadOnly) {
             const pcm16 = float32ToPCM16(audio)
             const b64 = arrayBufferToBase64(pcm16.buffer)
             send({ type: 'audio_data', data: b64 })
-            send({ type: 'voice_end' })
           }
+          window.setTimeout(() => send({ type: 'voice_end' }), 0)
         },
         onVADMisfire: () => {
           if (voiceActiveRef.current) {
@@ -62,17 +84,24 @@ export function useAudioCapture(
         },
       })
 
+      if (!startingRef.current) {
+        vad.destroy()
+        return
+      }
       vadRef.current = vad
+      startingRef.current = false
       setIsCapturing(true)
       onEvent?.(`Silero VAD 输入轨已启动${vadOnly ? ' (仅检测)' : ''}`)
     } catch (error) {
+      startingRef.current = false
       const msg = error instanceof Error ? error.message : '麦克风权限被拒绝或设备不可用'
       throw new Error(msg)
     }
-  }, [send, inputDeviceId, onEvent, vadOnly])
+  }, [send, inputDeviceId, onEvent, vadOnly, onVoiceEnd, onVoiceStart])
 
   const stopCapture = useCallback(() => {
-    if (voiceActiveRef.current && !vadOnly) {
+    startingRef.current = false
+    if (voiceActiveRef.current) {
       send({ type: 'voice_end' })
     }
     if (vadRef.current) {
@@ -83,7 +112,7 @@ export function useAudioCapture(
     setIsCapturing(false)
     setIsVoiceActive(false)
     onEvent?.('Silero VAD 输入轨已停止')
-  }, [send, onEvent, vadOnly])
+  }, [send, onEvent])
 
   return { isCapturing, isVoiceActive, startCapture, stopCapture }
 }

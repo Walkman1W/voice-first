@@ -5,10 +5,13 @@ import { ControlBar } from './components/ControlBar'
 import { InputArea } from './components/InputArea'
 import { LogPanel } from './components/LogPanel'
 import { useWebSocket } from './hooks/useWebSocket'
-import { useAudioCapture } from './hooks/useAudioCapture'
+import { useAudioCapture, preRequestMicrophone } from './hooks/useAudioCapture'
+
+preRequestMicrophone()
 import { useWebSpeechASR } from './hooks/useWebSpeechASR'
 import { useTTSPlayer, handleTTSMessage } from './hooks/useTTSPlayer'
 import { playSoundCue, useSoundEffects } from './hooks/useSoundEffects'
+import { appConfig } from './config'
 import type { AppState, ASRConfig, ChatMessage, LogEntry, ServerMessage } from './types'
 
 let msgId = 0
@@ -31,7 +34,6 @@ export default function App() {
   const [logVisible, setLogVisible] = useState(false)
   const [partialText, setPartialText] = useState('')
   const [trackState, setTrackState] = useState({ thinking: false, playing: false })
-  const registeredRef = useRef(false)
 
   const appStateRef = useRef<AppState>(appState)
   appStateRef.current = appState
@@ -44,19 +46,21 @@ export default function App() {
     const time = new Date().toTimeString().slice(0, 8)
     setLogs((prev) => {
       const next = [...prev, { id: genId(), time, state: appStateRef.current, message, level }]
-      return next.length > 80 ? next.slice(-80) : next
+      return next.length > appConfig.maxLogEntries ? next.slice(-appConfig.maxLogEntries) : next
     })
   }, [])
 
+  const { isListening, startListening, stopListening, forceFinalize, resumeListening } = useWebSpeechASR(
+    send,
+    (message) => addLog(message)
+  )
   const { isCapturing, isVoiceActive, startCapture, stopCapture } = useAudioCapture(
     send,
     inputDeviceId || undefined,
     (message) => addLog(message),
-    asrConfig.mode === 'client'
-  )
-  const { isListening, startListening, stopListening } = useWebSpeechASR(
-    send,
-    (message) => addLog(message)
+    asrConfig.mode === 'client',
+    forceFinalize,
+    resumeListening
   )
   useSoundEffects(appState, isVoiceActive)
 
@@ -74,10 +78,7 @@ export default function App() {
   }, [refreshDevices])
 
   useEffect(() => {
-    if (registeredRef.current) return
-    registeredRef.current = true
-
-    onMessage((msg: ServerMessage) => {
+    return onMessage((msg: ServerMessage) => {
       switch (msg.type) {
         case 'asr_partial':
           setPartialText(msg.text || '')
@@ -154,7 +155,6 @@ export default function App() {
         if (!isCapturing) startCapture().catch((e) => {
           addMessage('system', `VAD 启动失败: ${e instanceof Error ? e.message : '未知错误'}`)
         })
-        if (!isListening) startListening()
       } else {
         if (isCapturing) stopCapture()
         if (isListening) stopListening()
@@ -184,7 +184,7 @@ export default function App() {
       resumeTimerRef.current = setTimeout(() => {
         ttsPlayer.setSpeechBlocked(false)
         resumeTimerRef.current = null
-      }, 2000)
+      }, appConfig.playbackResumeDelayMs)
     }
     return () => {
       if (resumeTimerRef.current) {

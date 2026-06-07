@@ -1,10 +1,13 @@
 import { useRef, useCallback, useState } from 'react'
+import { appConfig } from '../config'
 import type { ClientMessage } from '../types'
 
 export interface WebSpeechASRHook {
   isListening: boolean
   startListening: () => void
   stopListening: () => void
+  forceFinalize: () => void
+  resumeListening: () => void
 }
 
 interface SpeechRecognitionEvent {
@@ -53,12 +56,10 @@ export function useWebSpeechASR(
       return
     }
 
-    if (recognitionRef.current) {
-      recognitionRef.current.abort()
-    }
+    if (recognitionRef.current) return
 
     const recognition = new SpeechRecognition()
-    recognition.lang = 'zh-CN'
+    recognition.lang = appConfig.speechLanguage
     recognition.continuous = true
     recognition.interimResults = true
     recognition.maxAlternatives = 1
@@ -89,19 +90,24 @@ export function useWebSpeechASR(
       onEvent?.(`Web Speech ASR 错误: ${event.error}`)
       if (event.error === 'not-allowed') {
         shouldRestartRef.current = false
+        recognitionRef.current = null
         setIsListening(false)
       }
     }
 
     recognition.onend = () => {
-      if (shouldRestartRef.current) {
+      if (shouldRestartRef.current && recognitionRef.current === recognition) {
         try {
           recognition.start()
         } catch {
           setIsListening(false)
+          recognitionRef.current = null
           shouldRestartRef.current = false
         }
       } else {
+        if (recognitionRef.current === recognition) {
+          recognitionRef.current = null
+        }
         setIsListening(false)
       }
     }
@@ -113,6 +119,8 @@ export function useWebSpeechASR(
       recognition.start()
     } catch {
       onEvent?.('Web Speech ASR: 启动失败')
+      recognitionRef.current = null
+      shouldRestartRef.current = false
       setIsListening(false)
     }
   }, [send, onEvent])
@@ -127,5 +135,25 @@ export function useWebSpeechASR(
     onEvent?.('Web Speech ASR: 停止监听')
   }, [onEvent])
 
-  return { isListening, startListening, stopListening }
+  const forceFinalize = useCallback(() => {
+    shouldRestartRef.current = false
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+    }
+  }, [])
+
+  const resumeListening = useCallback(() => {
+    if (!recognitionRef.current) {
+      startListening()
+      return
+    }
+    shouldRestartRef.current = true
+    try {
+      recognitionRef.current.start()
+    } catch {
+      // already running, ignore
+    }
+  }, [startListening])
+
+  return { isListening, startListening, stopListening, forceFinalize, resumeListening }
 }
