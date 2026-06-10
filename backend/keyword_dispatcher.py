@@ -8,16 +8,21 @@ class KeywordEvent:
     action: CommandType
     text: str
     cleaned_text: str
+    confidence: float = 1.0
 
 
 class KeywordDispatcher:
-    """Business keyword dispatch layer kept separate from ASR text decoding."""
+    """Business keyword dispatch layer with confidence filtering."""
+
+    MIN_CONFIDENCE = 0.8
 
     def dispatch(self, text: str) -> KeywordEvent | None:
         result: ParseResult = parse_command(text)
         if result.command == CommandType.NONE:
             return None
-        return KeywordEvent(result.command, text, result.cleaned_text)
+        if result.confidence < self.MIN_CONFIDENCE:
+            return None
+        return KeywordEvent(result.command, text, result.cleaned_text, result.confidence)
 
     def has_wake_word(self, text: str) -> bool:
         return is_wake_word(text)

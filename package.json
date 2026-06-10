@@ -13,6 +13,8 @@
     "electron:dev": "vite --mode electron",
     "electron:build": "vite build && electron-builder",
     "preview": "vite preview",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=crayfish-voice",
+    "tunnel": "cloudflared tunnel run crayfish-backend",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

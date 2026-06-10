@@ -26,13 +26,16 @@ export function useAudioCapture(
   onEvent?: (message: string) => void,
   vadOnly?: boolean,
   onVoiceEnd?: () => void,
-  onVoiceStart?: () => void
+  onVoiceStart?: () => void,
+  onAudioFrame?: (pcm16: Int16Array) => void
 ): AudioCaptureHook {
   const [isCapturing, setIsCapturing] = useState(false)
   const [isVoiceActive, setIsVoiceActive] = useState(false)
   const vadRef = useRef<MicVAD | null>(null)
   const startingRef = useRef(false)
   const voiceActiveRef = useRef(false)
+  const onAudioFrameRef = useRef(onAudioFrame)
+  onAudioFrameRef.current = onAudioFrame
 
   useEffect(() => {
     preRequestMicrophone()
@@ -47,15 +50,26 @@ export function useAudioCapture(
         model: appConfig.vadModel,
         baseAssetPath: appConfig.vadAssetPath,
         onnxWASMBasePath: appConfig.vadAssetPath,
+        ortConfig: (ort) => {
+          ort.env.wasm.numThreads = 1
+          ort.env.wasm.wasmPaths = appConfig.vadAssetPath
+        },
         startOnLoad: true,
         positiveSpeechThreshold: appConfig.vadPositiveThreshold,
         negativeSpeechThreshold: appConfig.vadNegativeThreshold,
         minSpeechMs: appConfig.vadMinSpeechMs,
+        redemptionMs: appConfig.vadRedemptionMs,
         ...(inputDeviceId ? {
           getStream: () => navigator.mediaDevices.getUserMedia({
             audio: { deviceId: { exact: inputDeviceId }, channelCount: 1 },
           }),
         } : {}),
+        onFrameProcessed: (_probabilities: { isSpeech: number }, frame: Float32Array) => {
+          if (onAudioFrameRef.current) {
+            const pcm16 = float32ToPCM16(frame)
+            onAudioFrameRef.current(pcm16)
+          }
+        },
         onSpeechStart: () => {
           voiceActiveRef.current = true
           setIsVoiceActive(true)

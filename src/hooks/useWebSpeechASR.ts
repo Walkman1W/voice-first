@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react'
+import React, { useRef, useCallback, useState } from 'react'
 import { appConfig } from '../config'
 import type { ClientMessage } from '../types'
 
@@ -43,11 +43,14 @@ declare global {
 
 export function useWebSpeechASR(
   send: (msg: ClientMessage) => void,
-  onEvent?: (message: string) => void
+  onEvent?: (message: string) => void,
+  voiceGateRef?: React.RefObject<boolean>
 ): WebSpeechASRHook {
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null)
   const shouldRestartRef = useRef(false)
+  const restartCountRef = useRef(0)
+  const lastStartTimeRef = useRef(0)
 
   const startListening = useCallback(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
@@ -66,10 +69,13 @@ export function useWebSpeechASR(
 
     recognition.onstart = () => {
       setIsListening(true)
+      lastStartTimeRef.current = Date.now()
       onEvent?.('Web Speech ASR: 开始监听')
     }
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
+      restartCountRef.current = 0
+      if (voiceGateRef && !voiceGateRef.current) return
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i]
         const text = result[0].transcript.trim()
@@ -84,11 +90,8 @@ export function useWebSpeechASR(
     }
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (event.error === 'no-speech' || event.error === 'aborted') {
-        return
-      }
-      onEvent?.(`Web Speech ASR 错误: ${event.error}`)
-      if (event.error === 'not-allowed') {
+      onEvent?.(`Web Speech ASR 错误: ${event.error}${event.message ? ' - ' + event.message : ''}`)
+      if (event.error === 'not-allowed' || event.error === 'network' || event.error === 'service-not-allowed') {
         shouldRestartRef.current = false
         recognitionRef.current = null
         setIsListening(false)
@@ -97,6 +100,27 @@ export function useWebSpeechASR(
 
     recognition.onend = () => {
       if (shouldRestartRef.current && recognitionRef.current === recognition) {
+        const elapsed = Date.now() - lastStartTimeRef.current
+        if (elapsed < 1000) {
+          restartCountRef.current++
+        } else {
+          restartCountRef.current = 0
+        }
+
+        if (restartCountRef.current >= 3) {
+          onEvent?.('Web Speech ASR: 重启过于频繁，暂停 3 秒')
+          setIsListening(false)
+          recognitionRef.current = null
+          setTimeout(() => {
+            restartCountRef.current = 0
+            if (shouldRestartRef.current) {
+              recognitionRef.current = null
+              startListening()
+            }
+          }, 3000)
+          return
+        }
+
         try {
           recognition.start()
         } catch {
@@ -127,13 +151,13 @@ export function useWebSpeechASR(
 
   const stopListening = useCallback(() => {
     shouldRestartRef.current = false
+    restartCountRef.current = 0
     if (recognitionRef.current) {
       recognitionRef.current.abort()
       recognitionRef.current = null
     }
     setIsListening(false)
-    onEvent?.('Web Speech ASR: 停止监听')
-  }, [onEvent])
+  }, [])
 
   const forceFinalize = useCallback(() => {
     shouldRestartRef.current = false
@@ -148,11 +172,6 @@ export function useWebSpeechASR(
       return
     }
     shouldRestartRef.current = true
-    try {
-      recognitionRef.current.start()
-    } catch {
-      // already running, ignore
-    }
   }, [startListening])
 
   return { isListening, startListening, stopListening, forceFinalize, resumeListening }

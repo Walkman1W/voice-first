@@ -10,7 +10,7 @@ export interface WebSocketHook {
   appState: AppState
   stateText: string
   send: (msg: ClientMessage) => void
-  onMessage: (handler: (msg: ServerMessage) => void) => void
+  onMessage: (handler: (msg: ServerMessage) => void) => () => void
 }
 
 export function useWebSocket(): WebSocketHook {
@@ -77,6 +77,9 @@ export function useWebSocket(): WebSocketHook {
 
   const onMessage = useCallback((handler: (msg: ServerMessage) => void) => {
     handlersRef.current.push(handler)
+    return () => {
+      handlersRef.current = handlersRef.current.filter((h) => h !== handler)
+    }
   }, [])
 
   return { connected, appState, stateText, send, onMessage }

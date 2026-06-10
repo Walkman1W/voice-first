@@ -1,20 +1,22 @@
 const fs = require('fs')
 const path = require('path')
 
-const targetDirs = [
-  path.join(__dirname, '..', 'public', 'vad'),
-  path.join(__dirname, '..', 'dist', 'vad'),
-]
+const publicDir = path.join(__dirname, '..', 'public', 'vad')
+const distDir = path.join(__dirname, '..', 'dist', 'vad')
 
-const files = [
+const commonFiles = [
   ['@ricky0123/vad-web/dist/silero_vad_v5.onnx', 'silero_vad_v5.onnx'],
   ['@ricky0123/vad-web/dist/vad.worklet.bundle.min.js', 'vad.worklet.bundle.min.js'],
   ['onnxruntime-web/dist/ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.wasm'],
   ['onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm', 'ort-wasm-simd-threaded.jsep.wasm'],
+]
+
+// .mjs only goes to dist (production), NOT public (Vite blocks import() from public/)
+const distOnlyFiles = [
   ['onnxruntime-web/dist/ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.mjs'],
 ]
 
-for (const targetDir of targetDirs) {
+function copyFiles(files, targetDir) {
   fs.mkdirSync(targetDir, { recursive: true })
   for (const [src, dest] of files) {
     const srcPath = path.join(__dirname, '..', 'node_modules', src)
@@ -27,3 +29,7 @@ for (const targetDir of targetDirs) {
     }
   }
 }
+
+copyFiles(commonFiles, publicDir)
+copyFiles(commonFiles, distDir)
+copyFiles(distOnlyFiles, distDir)

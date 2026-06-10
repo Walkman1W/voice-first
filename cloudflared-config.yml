@@ -1,0 +1,13 @@
+# Cloudflare Tunnel 配置模板
+# 复制到 ~/.cloudflared/config.yml 使用
+# 替换 <TUNNEL_ID> 为你实际的 Tunnel ID
+
+tunnel: <TUNNEL_ID>
+credentials-file: ~/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: api-siri.agentsignals.ai
+    service: http://localhost:3456
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404

@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { StatusBar } from './components/StatusBar'
 import { ChatPanel } from './components/ChatPanel'
 import { ControlBar } from './components/ControlBar'
+import { PlaybackBar } from './components/PlaybackBar'
 import { InputArea } from './components/InputArea'
 import { LogPanel } from './components/LogPanel'
 import { useWebSocket } from './hooks/useWebSocket'
@@ -9,10 +10,12 @@ import { useAudioCapture, preRequestMicrophone } from './hooks/useAudioCapture'
 
 preRequestMicrophone()
 import { useWebSpeechASR } from './hooks/useWebSpeechASR'
+import { useVolcanoASR } from './hooks/useVolcanoASR'
 import { useTTSPlayer, handleTTSMessage } from './hooks/useTTSPlayer'
 import { playSoundCue, useSoundEffects } from './hooks/useSoundEffects'
 import { appConfig } from './config'
-import type { AppState, ASRConfig, ChatMessage, LogEntry, ServerMessage } from './types'
+import type { AppState, ASRConfig, ChatMessage, LogEntry, ServerMessage, TimingData } from './types'
+import type { ASREngineType } from './config'
 
 let msgId = 0
 const genId = () => String(++msgId)
@@ -34,6 +37,7 @@ export default function App() {
   const [logVisible, setLogVisible] = useState(false)
   const [partialText, setPartialText] = useState('')
   const [trackState, setTrackState] = useState({ thinking: false, playing: false })
+  const [timing, setTiming] = useState<TimingData>({})
 
   const appStateRef = useRef<AppState>(appState)
   appStateRef.current = appState
@@ -50,17 +54,39 @@ export default function App() {
     })
   }, [])
 
+  const voiceGateRef = useRef(false)
+
   const { isListening, startListening, stopListening, forceFinalize, resumeListening } = useWebSpeechASR(
     send,
-    (message) => addLog(message)
+    (message) => addLog(message),
+    voiceGateRef
   )
+
+  const [asrEngine, setAsrEngine] = useState<ASREngineType>(appConfig.asrEngine)
+  const useVolcanoEngine = asrEngine === 'volcano'
+
+  const handleVolcanoFatalError = useCallback((reason: string) => {
+    addMessage('system', `火山 ASR 不可用: ${reason}，已自动切换 Web Speech API`)
+    addLog(`火山 ASR 致命错误，自动降级: ${reason}`, 'warn')
+    setAsrEngine('webspeech')
+  }, [addMessage, addLog])
+
+  const volcanoASR = useVolcanoASR(send, (message) => addLog(message), handleVolcanoFatalError)
+
+  const onAudioFrame = useCallback((pcm16: Int16Array) => {
+    if (useVolcanoEngine) {
+      volcanoASR.feedAudio(pcm16)
+    }
+  }, [useVolcanoEngine, volcanoASR.feedAudio])
+
   const { isCapturing, isVoiceActive, startCapture, stopCapture } = useAudioCapture(
     send,
     inputDeviceId || undefined,
     (message) => addLog(message),
     asrConfig.mode === 'client',
-    forceFinalize,
-    resumeListening
+    useVolcanoEngine ? undefined : undefined,
+    useVolcanoEngine ? undefined : undefined,
+    useVolcanoEngine ? onAudioFrame : undefined
   )
   useSoundEffects(appState, isVoiceActive)
 
@@ -90,6 +116,7 @@ export default function App() {
         case 'user_message':
           addMessage('user', msg.text || '')
           setPartialText('')
+          setTiming({})
           addLog(`发送: ${msg.text}`, 'cmd')
           break
         case 'ai_reply':
@@ -123,6 +150,7 @@ export default function App() {
           break
         case 'playback_control':
           if (msg.action === 'clear') ttsPlayer.clear()
+          if (msg.action === 'stop_current') ttsPlayer.stopCurrent()
           if (msg.action === 'pause') ttsPlayer.pause()
           if (msg.action === 'resume') {
             ttsPlayer.resume()
@@ -143,6 +171,27 @@ export default function App() {
             addLog(`ASR 引擎: ${msg.engine} (模式: ${msg.mode})`, 'info')
           }
           break
+        case 'playback_status':
+          addLog(`播放状态: ${msg.current_index !== undefined ? msg.current_index + 1 : 0}/${msg.total_segments || 0}`)
+          break
+        case 'timing':
+          if (msg.stage === 'asr') {
+            setTiming((prev) => ({ ...prev, asr: msg.elapsed }))
+            addLog(`⏱ ASR: ${msg.elapsed}s`, 'cmd')
+          } else if (msg.stage === 'agent') {
+            setTiming((prev) => ({ ...prev, agent: msg.elapsed, agentFirstToken: msg.first_token }))
+            addLog(`⏱ Agent: ${msg.elapsed}s (首token: ${msg.first_token}s)`, 'cmd')
+          } else if (msg.stage === 'tts') {
+            setTiming((prev) => ({ ...prev, tts: msg.elapsed }))
+            addLog(`⏱ TTS: ${msg.elapsed}s`, 'cmd')
+          } else if (msg.stage === 'intent') {
+            setTiming((prev) => ({ ...prev, intent: msg.elapsed }))
+            addLog(`⏱ 意图判断: ${msg.elapsed}s`, 'cmd')
+          }
+          break
+        case 'intent_result':
+          addLog(`意图: ${msg.intent} | ${msg.reason || ''} (${msg.text || ''})`, 'cmd')
+          break
       }
     })
   }, [onMessage, addMessage, addLog, ttsPlayer])
@@ -150,30 +199,37 @@ export default function App() {
   useEffect(() => {
     const shouldCapture = connected && ['wake_listening', 'listening', 'recognizing', 'playing'].includes(appState)
 
-    if (asrConfig.mode === 'client') {
+    if (useVolcanoEngine) {
+      // 火山引擎模式：VAD 采集 + 火山 ASR WebSocket
       if (shouldCapture) {
         if (!isCapturing) startCapture().catch((e) => {
           addMessage('system', `VAD 启动失败: ${e instanceof Error ? e.message : '未知错误'}`)
         })
+        if (!volcanoASR.isSessionActive) volcanoASR.startSession()
+      } else {
+        if (isCapturing) stopCapture()
+        if (volcanoASR.isSessionActive) volcanoASR.endSession()
+      }
+      if (isListening) stopListening()
+    } else {
+      // Web Speech 模式：VAD 采集 + Web Speech API 持续运行
+      if (shouldCapture) {
+        if (!isCapturing) startCapture().catch((e) => {
+          addMessage('system', `VAD 启动失败: ${e instanceof Error ? e.message : '未知错误'}`)
+        })
+        if (!isListening) startListening()
       } else {
         if (isCapturing) stopCapture()
         if (isListening) stopListening()
       }
-    } else {
-      if (isListening) stopListening()
-      if (shouldCapture) {
-        if (!isCapturing) startCapture().catch((e) => {
-          addMessage('system', `麦克风错误: ${e instanceof Error ? e.message : '权限被拒绝'}`)
-        })
-      } else {
-        if (isCapturing) stopCapture()
-      }
+      if (volcanoASR.isSessionActive) volcanoASR.endSession()
     }
-  }, [connected, appState, asrConfig.mode, isCapturing, isListening, startCapture, stopCapture, startListening, stopListening, addMessage])
+  }, [connected, appState, isCapturing, isListening, startCapture, stopCapture, startListening, stopListening, addMessage, useVolcanoEngine, volcanoASR.isSessionActive, volcanoASR.startSession, volcanoASR.endSession])
 
   const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
+    voiceGateRef.current = isVoiceActive
     if (isVoiceActive) {
       if (resumeTimerRef.current) {
         clearTimeout(resumeTimerRef.current)
@@ -233,6 +289,23 @@ export default function App() {
 
       <div className="device-bar">
         <label>
+          <span>识别引擎</span>
+          <select
+            value={asrEngine}
+            onChange={(e) => {
+              const newEngine = e.target.value as ASREngineType
+              if (newEngine === asrEngine) return
+              if (useVolcanoEngine && volcanoASR.isSessionActive) volcanoASR.endSession()
+              if (!useVolcanoEngine && isListening) stopListening()
+              setAsrEngine(newEngine)
+              addLog(`ASR 引擎切换: ${newEngine}`, 'cmd')
+            }}
+          >
+            <option value="volcano">火山引擎</option>
+            <option value="webspeech">Web Speech API</option>
+          </select>
+        </label>
+        <label>
           <span>麦克风</span>
           <select
             value={inputDeviceId}
@@ -268,7 +341,20 @@ export default function App() {
         <span className={(ttsPlayer.isPlaying || ttsPlayer.queueLength > 0 || trackState.playing) ? 'on' : ''}>
           播放轨 {ttsPlayer.isPaused ? '暂停' : ttsPlayer.isPlaying ? '播放中' : ttsPlayer.queueLength > 0 ? `排队 ${ttsPlayer.queueLength}` : '空闲'}
         </span>
+        <span className={useVolcanoEngine ? (volcanoASR.isConnected ? 'on' : '') : (isListening ? 'on' : '')}>
+          ASR {useVolcanoEngine ? `火山${volcanoASR.isConnected ? ' 已连接' : ' 未连接'}` : `WebSpeech${isListening ? ' 监听中' : ''}`}
+        </span>
       </div>
+
+      {(timing.asr !== undefined || timing.agent !== undefined || timing.tts !== undefined) && (
+        <div className="timing-bar">
+          {timing.asr !== undefined && <span className="timing-tag asr">ASR {timing.asr}s</span>}
+          {timing.intent !== undefined && <span className="timing-tag intent">意图 {timing.intent}s</span>}
+          {timing.agent !== undefined && <span className="timing-tag agent">Agent {timing.agent}s</span>}
+          {timing.agentFirstToken !== undefined && <span className="timing-tag agent-ft">首token {timing.agentFirstToken}s</span>}
+          {timing.tts !== undefined && <span className="timing-tag tts">TTS {timing.tts}s</span>}
+        </div>
+      )}
 
       <div className={`visualizer ${isVoiceActive ? '' : 'hidden'}`}>
         <div className="bar" /><div className="bar" /><div className="bar" /><div className="bar" /><div className="bar" />
@@ -285,6 +371,14 @@ export default function App() {
         onClear={handleClear}
         onToggleLog={() => setLogVisible((v) => !v)}
         logVisible={logVisible}
+      />
+
+      <PlaybackBar
+        player={ttsPlayer}
+        onPlaybackCommand={(action) => {
+          send({ type: 'playback_command', action })
+          addLog(`播放控制(UI): ${action}`, 'cmd')
+        }}
       />
 
       <InputArea
