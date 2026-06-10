@@ -1,9 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react'
 import type { ServerMessage, ClientMessage, AppState } from '../types'
-
-const WS_URL = import.meta.env.VITE_WS_PORT
-  ? `ws://${window.location.hostname}:${import.meta.env.VITE_WS_PORT}/ws`
-  : `ws://${window.location.host}/ws`
+import { appConfig } from '../config'
 
 export interface WebSocketHook {
   connected: boolean
@@ -24,7 +21,7 @@ export function useWebSocket(): WebSocketHook {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
 
-    const ws = new WebSocket(WS_URL)
+    const ws = new WebSocket(appConfig.wsUrl)
 
     ws.onopen = () => {
       setConnected(true)
